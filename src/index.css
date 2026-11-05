@@ -236,16 +236,16 @@
    AFTER theme blocks so --radius-* wins on source order (equal specificity). */
 :root,
 [data-density="compact"] {
-  --density-root-font: 112%;
-  --density-shell-pad: 20px;
-  --density-header-gap: 16px;
-  --density-page-gap: 10px;
-  --density-panel-pad: 13px;
-  --density-panel-title-mb: 9px;
-  --density-card-pad: 14px;
-  --density-card-gap: 8px;
-  --density-overview-rhythm: 16px;
-  --density-overview-title: 24px;
+  --density-root-font: 104%;
+  --density-shell-pad: 14px;
+  --density-header-gap: 12px;
+  --density-page-gap: 8px;
+  --density-panel-pad: 10px;
+  --density-panel-title-mb: 7px;
+  --density-card-pad: 12px;
+  --density-card-gap: 6px;
+  --density-overview-rhythm: 12px;
+  --density-overview-title: 22px;
   --radius-panel: 16px;
   --radius-sm: 8px;
 }

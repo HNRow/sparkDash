@@ -125,6 +125,7 @@ function inApp(go: () => void) {
   };
 }
 
+/** Render a compact, sortable Spark row while preserving keyboard navigation. */
 function RailSpark({
   spark,
   isActive,
@@ -146,7 +147,7 @@ function RailSpark({
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition, zIndex: isDragging ? 10 : undefined, opacity: isDragging ? 0.6 : 1 }}
-      className={`rail-item ${isActive ? "is-active" : ""}`}
+      className={`rail-item rail-item--spark ${isActive ? "is-active" : ""}`}
     >
       <a
         href={idToPath(spark.id)}
@@ -320,7 +321,7 @@ export function AppSidebar({
         ) : (
           <nav className="rail-list" aria-label={t("nav.sparks")}>
             {sparks.map((s) => (
-              <div key={s.id} className={`rail-item ${activeId === s.id ? "is-active" : ""}`}>
+              <div key={s.id} className={`rail-item rail-item--spark ${activeId === s.id ? "is-active" : ""}`}>
                 <a
                   href={idToPath(s.id)}
                   className="flex min-w-0 flex-1 items-center gap-2.5 border-0 bg-transparent p-0 text-left text-inherit no-underline"
