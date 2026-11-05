@@ -278,6 +278,9 @@ export class LlmProbe {
     this._lastDetectAt = 0;
     /** @type {{ value: number, liveUntil: number } | null} */
     this._sglangStickyTps = null;
+    /** 上一次 SGLang TTFT 直方图的 sum/count，用于算轮询窗口均值。 */
+    this._sglangTtftSum = null;
+    this._sglangTtftCount = null;
     /** Latest gen_throughput from /v1/loads, if that payload carried one. */
     this._sglangLoadGenTps = null;
     /** Whether this poll's /server_info carried total_input/output_tokens. */
@@ -1161,7 +1164,7 @@ export class LlmProbe {
         const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
         if (metricsRes.ok) {
           const txt = await metricsRes.text();
-          this._applySglangKvMetrics(txt);
+          this._applySglangKvMetrics(txt, dtSec);
           if (this._sglangTotalsPolled) this._applySglangPrefillSplit(txt, dtSec);
           else this._applySglangMetrics(txt, dtSec);
         }
@@ -2887,7 +2890,7 @@ export class LlmProbe {
    * Max, not sum: tensor-parallel ranks each report the same pool.
    * @param {string} txt
    */
-  _applySglangKvMetrics(txt) {
+  _applySglangKvMetrics(txt, dtSec = 0) {
     const series = (name) =>
       this._getPromMetricMax(txt, `sglang:${name}`) ??
       this._getPromMetricMax(txt, `sglang_${name}`);
@@ -2902,6 +2905,37 @@ export class LlmProbe {
     if (this.kvCacheGb == null) {
       this.kvCacheGb = LlmProbe._positiveNumber(series("kv_cache_memory_usage_gb"));
     }
+
+    // 首 Token 延迟：直方图 sum/count 的轮询窗口均值；p95 用累计桶估算。
+    const ttftSum = this._getPromMetricMax(txt, "sglang:time_to_first_token_seconds_sum");
+    const ttftCount = this._getPromMetricMax(txt, "sglang:time_to_first_token_seconds_count");
+    if (ttftSum != null && ttftCount != null) {
+      if (
+        dtSec > 0 &&
+        this._sglangTtftSum != null &&
+        this._sglangTtftCount != null &&
+        ttftCount > this._sglangTtftCount
+      ) {
+        const deltaSum = ttftSum - this._sglangTtftSum;
+        const deltaCount = ttftCount - this._sglangTtftCount;
+        if (deltaCount > 0 && deltaSum >= 0) {
+          this.ttftSeconds = Math.round((deltaSum / deltaCount) * 1000) / 1000;
+        }
+      }
+      this._sglangTtftSum = ttftSum;
+      this._sglangTtftCount = ttftCount;
+    }
+    const ttftHist = this._parseHistogram(
+      txt,
+      "sglang:time_to_first_token_seconds",
+      "sglang:time_to_first_token_seconds_count"
+    );
+    const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
+    this.ttftP95Seconds = ttftP95 == null ? null : Math.round(ttftP95 * 1000) / 1000;
+
+    // 推测解码（MTP / DSpark）接受率：gauge，带 rank 标签取最大值。
+    const accept = this._getPromMetricMax(txt, "sglang:spec_accept_rate");
+    this.mtpAcceptanceRate = accept == null ? null : Math.round(accept * 10000) / 10000;
   }
 
   /** True when SGLang load probe reported running or waiting requests. */

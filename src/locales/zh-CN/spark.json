@@ -195,7 +195,7 @@
       "prefixCache": "前缀命中率",
       "e2eP95": "E2E p95",
       "itlP95": "Token 间隔 p95",
-      "mtpAccept": "MTP 接受率"
+      "mtpAccept": "接受率"
     },
     "metricInfo": "{{label}}说明",
     "idleLastServed": "空闲 · 上次服务于 {{age}} 前",

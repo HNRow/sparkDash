@@ -523,7 +523,9 @@ export function LlmPanel({
   const isVllm = llm != null && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "flare" || llm.backend === "locals" || llm.backend === "splash");
   // FreeToken reports KV use, active requests and a TTFT mean in /v1/stats; the tiles below are null-gated.
   const isFreeToken = llm?.backend === "freetoken";
-  const showEngineTiles = isVllm || isFreeToken || isStrata;
+  // SGLang 也报告 KV 使用率、TTFT 与推测解码接受率，这些引擎指标同样适用。
+  const isSglang = llm?.backend === "sglang";
+  const showEngineTiles = isVllm || isSglang || isFreeToken || isStrata;
   const kvTone =
     llm?.kvCacheUsage == null
       ? ""
@@ -910,7 +912,7 @@ export function LlmPanel({
                 `${Math.round(llm.requestsRunning)} / ${llm.requestsWaiting != null ? Math.round(llm.requestsWaiting) : "—"}`,
                 { align: "right" }
               )}
-            {isFreeToken && llm?.ttftSeconds != null && tile("ttftMean", t("llm.tiles.ttftMean"), `${Math.round(llm.ttftSeconds * 1000)} ms`)}
+            {llm?.ttftSeconds != null && tile("ttftMean", t("llm.tiles.ttftMean"), `${Math.round(llm.ttftSeconds * 1000)} ms`)}
             {showEngineTiles && llm?.ttftP95Seconds != null && tile("ttftP95", t("llm.tiles.ttftP95"), `${Math.round(llm.ttftP95Seconds * 1000)} ms`)}
             {showEngineTiles &&
               llm?.preemptionsTotal != null &&

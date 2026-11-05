@@ -936,3 +936,23 @@ test("probe: SGLang without /metrics leaves KV fill unknown, not stale", async (
   assert.equal(snap.weightsGb, 71.066);
   assert.equal(snap.kvCacheGb, 10.729);
 });
+
+test("_applySglangKvMetrics: TTFT 窗口均值、p95 与推测接受率", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  const expo = (sum, count) => [
+    "sglang:token_usage 0.1",
+    `sglang:time_to_first_token_seconds_sum ${sum}`,
+    `sglang:time_to_first_token_seconds_count ${count}`,
+    'sglang:time_to_first_token_seconds_bucket{le="0.1"} 0',
+    `sglang:time_to_first_token_seconds_bucket{le="0.5"} ${count}`,
+    `sglang:time_to_first_token_seconds_bucket{le="1.0"} ${count}`,
+    `sglang:time_to_first_token_seconds_bucket{le="+Inf"} ${count}`,
+    'sglang:spec_accept_rate{engine_type="unified",tp_rank="0"} 0.595',
+  ].join("\n");
+  probe._applySglangKvMetrics(expo(10, 10), 2); // 建立基线
+  probe._applySglangKvMetrics(expo(15.2, 12), 2); // 窗口内 2 个请求，共 5.2s
+  assert.equal(probe.ttftSeconds, 2.6);
+  assert.equal(probe.kvCacheUsage, 0.1);
+  assert.equal(probe.mtpAcceptanceRate, 0.595);
+  assert.ok(probe.ttftP95Seconds != null && probe.ttftP95Seconds > 0.4);
+});

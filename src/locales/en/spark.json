@@ -195,7 +195,7 @@
       "prefixCache": "Prefix hit",
       "e2eP95": "E2E p95",
       "itlP95": "Inter-token p95",
-      "mtpAccept": "MTP accept"
+      "mtpAccept": "Acceptance rate"
     },
     "metricInfo": "{{label}} info",
     "idleLastServed": "Idle · last served {{age}} ago",
