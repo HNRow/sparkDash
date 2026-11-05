@@ -5,6 +5,8 @@ import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import fs from "fs";
+import zlib from "node:zlib";
+import { promisify } from "node:util";
 import path from "path";
 import { fileURLToPath } from "url";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
@@ -12,6 +14,7 @@ import { resolveFrontendDir, FRONTEND_MISSING_MESSAGE } from "./frontendDir.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
 import { LlmProbe } from "./collectors/LlmProbe.js";
 import { detectLlmMovedToWorker, reconcileMovedEngineHints } from "./sparks/LlmMovedToWorker.js";
+import { atomicWriteAsync } from "./util/atomicWrite.js";
 import { sshExec } from "./collectors/ssh.js";
 import { comfyCancelJob } from "./collectors/comfyActions.js";
 import {
@@ -318,6 +321,8 @@ const fleetEnergyTracker = new FleetEnergyTracker({
   nodeIds: registry.sparkIds,
   filePath: FLEET_ENERGY_JSON_PATH,
   monthlyFilePath: FLEET_ENERGY_MONTHLY_JSON_PATH,
+  // 异步落盘：定时器里同步写 4.2MB + fsync 会卡住事件循环（USB 存储上可达数秒）。
+  writeStateAsync: atomicWriteAsync,
 });
 
 // ─── Fleet event log ─────────────────────────────────────
@@ -325,6 +330,8 @@ const eventLog = new EventLog({
   file: process.env.EVENTS_JSON_PATH || path.join(ROOT, "config", "events.json"),
   // The Activity page browses history, so keep far more than the Overview card shows.
   max: 2000,
+  // 异步写盘：同步写会卡事件循环。
+  writeAsync: atomicWriteAsync,
 });
 
 // ─── MQTT bridge (opt-in, Settings → MQTT) ───────────────
@@ -2395,11 +2402,86 @@ app.get("/metrics", (_req, res) => {
 });
 
 // ─── Static files (built frontend) ───────────────────────
+// 前端包约 1.45MB JS + 236KB CSS，容器在路由器上、客户端多为 Wi-Fi：
+// 对可压缩的静态文件预压一次并缓存，哈希文件名给长缓存，index.html 每次校验。
+const GZIP_EXT = /\.(?:js|css|svg|json|html|webmanifest)$/;
+const GZIP_TYPES = {
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+};
+const gzipAsync = promisify(zlib.gzip);
+const gzipCache = new Map(); // file -> { mtimeMs, size, body }
+const gzipPending = new Map(); // file -> Promise<entry>（并发请求共享一次压缩）
+// 异步读盘 + 压缩并缓存：首次请求不阻塞事件循环（同步读 1.45MB 在 USB 上很慢）。
+async function loadGzip(file) {
+  const stat = await fs.promises.stat(file);
+  const hit = gzipCache.get(file);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit;
+  const body = await gzipAsync(await fs.promises.readFile(file), { level: 6 });
+  const entry = { mtimeMs: stat.mtimeMs, size: stat.size, body };
+  gzipCache.set(file, entry);
+  return entry;
+}
+function gzipEntry(file) {
+  const pending = gzipPending.get(file);
+  if (pending) return pending;
+  const promise = loadGzip(file).finally(() => gzipPending.delete(file));
+  gzipPending.set(file, promise);
+  return promise;
+}
+app.use((req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") return next();
+  if (!GZIP_EXT.test(req.path)) return next();
+  if (!/\bgzip\b/i.test(req.headers["accept-encoding"] || "")) return next();
+  const dir = resolveFrontendDir(ROOT);
+  if (!dir) return next();
+  let file;
+  try {
+    file = path.join(dir, decodeURIComponent(req.path));
+    const rel = path.relative(dir, file);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return next();
+  } catch {
+    return next();
+  }
+  gzipEntry(file)
+    .then((entry) => {
+      res.setHeader("Content-Type", GZIP_TYPES[path.extname(file)] || "application/octet-stream");
+      res.setHeader("Content-Encoding", "gzip");
+      res.setHeader("Content-Length", entry.body.length);
+      res.setHeader("Vary", "Accept-Encoding");
+      res.setHeader(
+        "Cache-Control",
+        req.path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache"
+      );
+      res.end(req.method === "HEAD" ? undefined : entry.body);
+    })
+    .catch(() => next()); // 文件不存在或不可读：交给 express.static / SPA 兜底
+});
+
 const staticByDir = new Map();
 app.use((req, res, next) => {
   const dir = resolveFrontendDir(ROOT);
   if (!dir) return next();
-  if (!staticByDir.has(dir)) staticByDir.set(dir, express.static(dir));
+  if (!staticByDir.has(dir)) {
+    staticByDir.set(
+      dir,
+      express.static(dir, {
+        setHeaders(res, filePath) {
+          res.setHeader(
+            "Cache-Control",
+            filePath.startsWith(path.join(dir, "assets"))
+              ? "public, max-age=31536000, immutable"
+              : "no-cache"
+          );
+        },
+      })
+    );
+  }
   return staticByDir.get(dir)(req, res, next);
 });
 
@@ -2738,6 +2820,11 @@ async function shutdown(signal) {
   } catch (err) {
     console.error("[sparkDash] failed to flush LLM daily history:", err.message);
   }
+  // 两份异步写盘都是排队执行：退出前限时等待。
+  await Promise.race([
+    Promise.allSettled([eventLog.awaitIdle(), llmDaily.awaitIdle(), llmTokenLedger.awaitIdle()]),
+    new Promise((resolve) => setTimeout(resolve, 2000).unref()),
+  ]);
   llmTokenRuntime.stop();
   try {
     await occupancy.stop();
@@ -2750,6 +2837,11 @@ async function shutdown(signal) {
     console.error("[sparkDash] failed to stop power meters:", err.message);
   }
   const energyPersistenceSucceeded = fleetEnergyRuntime.stop();
+  // close() 只排队了异步写入：退出前限时等待，避免丢掉最后一次状态。
+  await Promise.race([
+    fleetEnergyTracker.awaitIdle().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 2000).unref()),
+  ]);
   const [streamAgentClosedGracefully] = await Promise.all([closeLlmStreamAgent(), mqttStopped]);
   if (!streamAgentClosedGracefully) {
     console.warn("[sparkDash] LLM dispatcher close timed out; destroyed open sockets");

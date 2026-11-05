@@ -6,7 +6,7 @@
  * Password auth uses sshpass -e (password via env), not -p on the command line.
  */
 import { decodeClixml, powershellCommand } from "./windowsMetrics.js";
-import { execFile } from "child_process";
+import { execViaHelper } from "./execViaHelper.js";
 import crypto from "crypto";
 import fs from "fs";
 import {
@@ -367,30 +367,40 @@ export async function sshExec(spark, cmd, options = {}) {
     remoteArgv: remoteArgvFor(spark, cmd),
   });
 
-  const execute = (execArgs) =>
-    new Promise((resolve, reject) => {
-      const child = execFile(file, execArgs, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-        const outcome = sshExecOutcome({
-          error: err,
-          stdout,
-          allowNonZeroExit: options.allowNonZeroExit,
-        });
-        if (outcome === null) {
-          const msg = stderr?.trim() || err?.message || "command failed";
-          reject(new Error(`SSH to ${targetHost}:${sshPort} failed: ${explainSshFailure(msg, { windows: isWindows })}`));
-        } else {
-          resolve(outcome);
-        }
+  // 交给常驻小进程 fork：主进程 VSZ 很大，直接 execFile 会偶发阻塞事件循环数秒。
+  const execute = (execArgs) => {
+    // `options.input` travels on stdin only (never argv, never the environment), e.g. a
+    // sudo password for one action. Ignored for the multiplex readiness probe.
+    const input =
+      typeof options.input === "string" && execArgs === args ? options.input : undefined;
+    return execViaHelper(file, execArgs, {
+      timeout: timeoutMs,
+      env,
+      maxBuffer: 10 * 1024 * 1024,
+      input,
+    }).then((res) => {
+      const error =
+        res.errCode !== 0 || res.signal
+          ? Object.assign(new Error(res.message || "command failed"), {
+              code: res.errCode,
+              killed: res.killed,
+              signal: res.signal,
+            })
+          : null;
+      const outcome = sshExecOutcome({
+        error,
+        stdout: res.stdout,
+        allowNonZeroExit: options.allowNonZeroExit,
       });
-      // Windows PowerShell can wait for stdin to close; nothing is ever sent on it.
-      if (isWindows) child.stdin?.end();
-      // `options.input` travels on stdin only (never argv, never the environment), e.g. a
-      // sudo password for one action. Ignored for the multiplex readiness probe.
-      else if (typeof options.input === "string" && execArgs === args) {
-        child.stdin?.on("error", () => {});
-        child.stdin?.end(options.input);
+      if (outcome === null) {
+        const msg = res.stderr?.trim() || error?.message || "command failed";
+        throw new Error(
+          `SSH to ${targetHost}:${sshPort} failed: ${explainSshFailure(msg, { windows: isWindows })}`
+        );
       }
+      return outcome;
     });
+  };
 
   if (multiplex) {
     const probeArgs = [...args];

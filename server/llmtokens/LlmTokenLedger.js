@@ -42,7 +42,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { atomicWrite, quarantineCorrupt } from "../util/atomicWrite.js";
+import { atomicWrite, atomicWriteAsync, quarantineCorrupt } from "../util/atomicWrite.js";
 import { addTokens, addTokensTo } from "../../src/shared/tokenFormat.js";
 import { LLM_TOKEN_JSON_PATH } from "../config.js";
 
@@ -259,8 +259,11 @@ export class LlmTokenLedger {
   /**
    * @param {string} [filePath]
    */
-  constructor(filePath = DEFAULT_LEDGER_PATH) {
+  constructor(filePath = DEFAULT_LEDGER_PATH, { writeAsync = null } = {}) {
     this.filePath = filePath;
+    // 生产传 atomicWriteAsync：同步写盘遇上 USB 存储抖动会卡住整个事件循环。
+    this._writeAsync = writeAsync;
+    this._writeChain = Promise.resolve();
     /** @type {{ version: number, series: Record<string, unknown> }} */
     this._data = { version: 1, series: {} };
     this._dirty = false;
@@ -356,12 +359,24 @@ export class LlmTokenLedger {
 
   flush() {
     if (!this._dirty) return;
+    const text = JSON.stringify(this._data);
+    this._dirty = false;
+    if (this._writeAsync) {
+      this._writeChain = this._writeChain
+        .then(() => this._writeAsync(this.filePath, text, 0o600))
+        .catch((err) => console.error("[LlmTokenLedger] write failed:", err.message));
+      return;
+    }
     try {
-      atomicWrite(this.filePath, JSON.stringify(this._data));
-      this._dirty = false;
+      atomicWrite(this.filePath, text);
     } catch (err) {
       console.error("[LlmTokenLedger] write failed:", err.message);
     }
+  }
+
+  /** 等待排队中的异步写盘完成（shutdown 用）。 */
+  awaitIdle() {
+    return this._writeChain;
   }
 
   close() {
@@ -694,4 +709,5 @@ LlmTokenLedger.prototype.history = function history(nowMs = Date.now()) {
   };
 };
 
-export const llmTokenLedger = new LlmTokenLedger();
+// 单例走异步写盘；测试自行构造时默认仍是同步语义。
+export const llmTokenLedger = new LlmTokenLedger(undefined, { writeAsync: atomicWriteAsync });

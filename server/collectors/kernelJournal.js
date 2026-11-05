@@ -51,6 +51,7 @@ export class KernelJournal {
     this.nextAt = 0;
     this.pending = null;
     this.complete = false;
+    this.failures = 0;
   }
 
   read() {
@@ -105,13 +106,16 @@ export class KernelJournal {
       // Backfill one bounded page per normal GPU poll. Never publish partial since-boot totals.
       if (this.complete) this.value = { ...totals };
       else this.value = null;
+      this.failures = 0;
       this.nextAt = this.now() + (this.complete ? this.intervalMs : 10_000);
     } catch (err) {
       // Never rethrow: read() is awaited inside the GPU metrics build, and a collector failure
       // must not stop the poll loop. The last complete reading is retained and the cursor is
       // left where it was, so nothing is double counted on the next attempt.
       const message = err instanceof Error ? err.message : String(err);
-      this.nextAt = this.now() + this.intervalMs;
+      // 连续失败时退避（10s → 20s → 40s → 60s 封顶），避免不可达的机器每轮都拉起 ssh。
+      this.failures += 1;
+      this.nextAt = this.now() + Math.min(60_000, 10_000 * 2 ** (this.failures - 1));
       console.warn(`[KernelJournal] Scan failed; retaining the last complete reading: ${message}`);
     }
     return this.value;

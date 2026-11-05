@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { writeStateAtomically } from "./atomicWrite.js";
+import { atomicWriteAsync } from "../util/atomicWrite.js";
 import { MonthlyEnergyArchive } from "./FleetEnergyMonthly.js";
 import { learnWallRatios, wallHour, wallMinute } from "./wallMinute.js";
 
@@ -344,6 +345,9 @@ export class FleetEnergyTracker {
     clearIntervalFn = clearInterval,
     fileSystem = fs,
     writeState = writeStateAtomically,
+    // 生产环境传 atomicWriteAsync：flush/flushRecent 每 30s、每小时写 4.2MB 状态，
+    // 同步写盘 + fsync 在 USB 存储上会长时间阻塞事件循环。测试不传，保持同步语义。
+    writeStateAsync = null,
     monthlyFilePath = null,
     monthly = null,
   } = {}) {
@@ -355,6 +359,8 @@ export class FleetEnergyTracker {
     this._clearInterval = clearIntervalFn;
     this._fs = fileSystem;
     this._writeState = writeState;
+    this._writeStateAsync = writeStateAsync;
+    this._writeChain = Promise.resolve();
     this._buckets = new Map();
     this._bucketsOrdered = true;
     this._latestBucketStart = null;
@@ -1723,7 +1729,7 @@ export class FleetEnergyTracker {
         : {}),
       buckets,
     };
-    this._writeState(this.filePath, `${JSON.stringify(state)}\n`, this._fs);
+    this._persist(this.filePath, `${JSON.stringify(state)}\n`);
     this._dirty = false;
     this._changedMinutes.clear();
     this._fullWriteNeeded = false;
@@ -1771,9 +1777,28 @@ export class FleetEnergyTracker {
       ...(Object.keys(this._wallState).length > 0 ? { wallMeter: this._wallState } : {}),
       buckets,
     };
-    this._writeState(this.recentFilePath, `${JSON.stringify(recent)}\n`, this._fs);
+    this._persist(this.recentFilePath, `${JSON.stringify(recent)}\n`);
     this._dirty = false;
     return true;
+  }
+
+  /** 写状态：有异步写入器时排队执行，否则同步写（测试路径）。 */
+  _persist(filePath, text) {
+    if (!this._writeStateAsync) {
+      this._writeState(filePath, text, this._fs);
+      return true;
+    }
+    this._writeChain = this._writeChain
+      .then(() => this._writeStateAsync(filePath, text, 0o600))
+      .catch((error) => {
+        console.error(`[FleetEnergyTracker] persist error: ${error.message}`);
+      });
+    return true;
+  }
+
+  /** 等待排队中的异步写入完成（shutdown 用，避免最后 30s 数据丢失）。 */
+  awaitIdle() {
+    return this._writeChain;
   }
 
   close() {

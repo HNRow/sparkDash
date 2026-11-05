@@ -36,7 +36,8 @@ export function createOccupancyPoller({
     const ticket = epoch;
     const controller = new AbortController();
     const enabled = enabledSnapshot();
-    const tokens = loadHelperTokens();
+    // 没有启用的 helper 时不必读 secrets：那是一次同步 stat/读盘，USB 抖动时会卡事件循环。
+    const tokens = enabled.length > 0 ? loadHelperTokens() : new Map();
     const allowed = allowlist();
     const job = Promise.all(
       enabled.map(async (helper) => {

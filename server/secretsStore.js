@@ -43,9 +43,31 @@ const KEY_LEN = 32;
 /** Cached key so we never regenerate mid-process. */
 let _cachedKey = null;
 
+/**
+ * 已解密的 secrets 缓存。occupancy 每 15s 调一次 loadHelperTokens()，每次都
+ * 同步读盘 + 解密会在事件循环上留下周期性的阻塞点（USB 存储偶尔很慢），
+ * 因此缓存结果，写盘/清空时失效。
+ * 返回的对象与其中的 Map 视为只读，调用方不要修改。
+ */
+let _secretsCache = null;
+/** 缓存对应的文件签名（mtime:size），文件被外部改动时失效。 */
+let _secretsCacheSig = null;
+
+/** stat 一次取签名；文件不存在返回 "missing"。 */
+function secretsFileSignature() {
+  try {
+    const st = fs.statSync(SPARKS_SECRETS_PATH);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "missing";
+  }
+}
+
 /** Test helper: drop the in-process key cache. Does not rotate the key file. */
 export function resetSecretsKeyCache() {
   _cachedKey = null;
+  _secretsCache = null;
+  _secretsCacheSig = null;
 }
 
 function ensureDir(filePath) {
@@ -142,6 +164,9 @@ let lastLoggedHelperTokens = -1;
 let tightenWarned = false;
 
 export function loadSecrets() {
+  const sig = secretsFileSignature();
+  if (_secretsCache && _secretsCacheSig === sig) return _secretsCache;
+
   /** @type {Map<string, string>} */
   const passwords = new Map();
   /** @type {Map<string, Record<string, string>>} */
@@ -149,8 +174,10 @@ export function loadSecrets() {
   /** @type {Map<string, string>} */
   const helperTokens = new Map();
 
-  if (!fs.existsSync(SPARKS_SECRETS_PATH)) {
-    return { passwords, llmApiKeys, helperTokens };
+  if (sig === "missing") {
+    _secretsCache = { passwords, llmApiKeys, helperTokens };
+    _secretsCacheSig = sig;
+    return _secretsCache;
   }
 
   // Versions before the save-time mode was tightened left this file 0644, and a
@@ -261,7 +288,9 @@ export function loadSecrets() {
     console.error(`[secretsStore] Failed to load secrets: ${err.message}`);
   }
 
-  return { passwords, llmApiKeys, helperTokens };
+  _secretsCache = { passwords, llmApiKeys, helperTokens };
+  _secretsCacheSig = secretsFileSignature();
+  return _secretsCache;
 }
 
 /**
@@ -396,6 +425,8 @@ function clearSecretsFile() {
   try {
     fs.accessSync(SPARKS_SECRETS_PATH, fs.constants.W_OK);
     fs.unlinkSync(SPARKS_SECRETS_PATH);
+    _secretsCache = null;
+    _secretsCacheSig = null;
   } catch (err) {
     throw new Error(
       `Failed to clear secrets file (permission?): ${err.message}. ` +
@@ -412,6 +443,7 @@ function writeSecretsFile({ secrets, llmApiKeys, alertChannels, helperTokens }) 
   // Owner-only, like the key file beside it: with a passphrase key the
   // ciphertext alone is enough for an offline guess.
   atomicWrite(SPARKS_SECRETS_PATH, JSON.stringify(body, null, 2) + "\n", 0o600);
+  _secretsCache = null;
 }
 
 // ─── Alert channel URLs ──────────────────────────────────

@@ -1,5 +1,5 @@
 import fs from "fs";
-import { atomicWrite, quarantineCorrupt } from "../util/atomicWrite.js";
+import { atomicWrite, atomicWriteAsync, quarantineCorrupt } from "../util/atomicWrite.js";
 
 const SEVERITIES = new Set(["info", "warn", "error", "success"]);
 const DEDUPE_MS = 5000;
@@ -14,8 +14,11 @@ export class EventLog {
   /**
    * @param {{ file?: string|null, max?: number, now?: () => number }} [opts]
    */
-  constructor({ file = null, max = 200, now = Date.now } = {}) {
+  constructor({ file = null, max = 200, now = Date.now, writeAsync = null } = {}) {
     this.file = file;
+    // 生产传 atomicWriteAsync：同步写盘遇上 USB 存储抖动会卡住整个事件循环。
+    this._writeAsync = writeAsync;
+    this._writeChain = Promise.resolve();
     this.max = Math.max(1, Math.floor(max) || 200);
     this._now = now;
     /** @type {object[]} oldest first */
@@ -163,16 +166,24 @@ export class EventLog {
       this._timer = null;
     }
     if (!this.file || !this._dirty) return;
+    const text = JSON.stringify({ nextId: this._nextId, events: this._events });
+    this._dirty = false;
+    if (this._writeAsync) {
+      this._writeChain = this._writeChain
+        .then(() => this._writeAsync(this.file, text, 0o644))
+        .catch((err) => console.error("[EventLog] persist failed:", err?.message));
+      return;
+    }
     try {
-      atomicWrite(
-        this.file,
-        JSON.stringify({ nextId: this._nextId, events: this._events }),
-        0o644
-      );
-      this._dirty = false;
+      atomicWrite(this.file, text, 0o644);
     } catch (err) {
       console.error("[EventLog] persist failed:", err?.message);
     }
+  }
+
+  /** 等待排队中的异步写盘完成（shutdown 用）。 */
+  awaitIdle() {
+    return this._writeChain;
   }
 }
 

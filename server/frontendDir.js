@@ -9,7 +9,22 @@ import path from "path";
  * build from before `git pull` + `docker compose up --build` must not shadow the new image.
  * Checked per request, so a host `npm run build` takes over without a restart.
  */
+/** resolveFrontendDir 的结果缓存：静态目录在 USB 上，每个请求两次 existsSync 会被存储抖动拖住。 */
+let _cache = null;
+const CACHE_MS = 5000;
+
 export function resolveFrontendDir(root, exists = fs.existsSync, mtimeMs = defaultMtime) {
+  // 注入 exists/mtime 时（测试）不用缓存，保持逐次判断。
+  const cacheable = exists === fs.existsSync && mtimeMs === defaultMtime;
+  if (cacheable && _cache && _cache.root === root && Date.now() - _cache.at < CACHE_MS) {
+    return _cache.value;
+  }
+  const result = resolveUncached(root, exists, mtimeMs);
+  if (cacheable) _cache = { root, at: Date.now(), value: result };
+  return result;
+}
+
+function resolveUncached(root, exists, mtimeMs) {
   const found = ["dist", "dist-baked"]
     .map((name) => path.join(root, name))
     .filter((dir) => exists(path.join(dir, "index.html")));

@@ -6,6 +6,7 @@
 import fs from "fs";
 import { LLM_DAILY_JSON_PATH } from "../config.js";
 import { atomicWrite } from "../util/atomicWrite.js";
+import { atomicWriteAsync } from "../util/atomicWrite.js";
 
 const MAX_DAYS = 30;
 const FLUSH_MS = 30_000;
@@ -98,8 +99,11 @@ export class LlmDailyStore {
   /**
    * @param {string} [filePath]
    */
-  constructor(filePath = LLM_DAILY_JSON_PATH) {
+  constructor(filePath = LLM_DAILY_JSON_PATH, { writeAsync = null } = {}) {
     this.filePath = filePath;
+    // 生产传 atomicWriteAsync：同步写盘遇上 USB 存储抖动会卡住整个事件循环。
+    this._writeAsync = writeAsync;
+    this._writeChain = Promise.resolve();
     /** @type {Record<string, Record<string, ReturnType<typeof emptyDay>>>} */
     this._data = {};
     this._dirty = false;
@@ -128,12 +132,24 @@ export class LlmDailyStore {
 
   flush() {
     if (!this._dirty) return;
+    const text = JSON.stringify(this._data);
+    this._dirty = false;
+    if (this._writeAsync) {
+      this._writeChain = this._writeChain
+        .then(() => this._writeAsync(this.filePath, text, 0o600))
+        .catch((err) => console.error("[LlmDaily] write failed:", err.message));
+      return;
+    }
     try {
-      atomicWrite(this.filePath, JSON.stringify(this._data));
-      this._dirty = false;
+      atomicWrite(this.filePath, text);
     } catch (err) {
       console.error("[LlmDaily] write failed:", err.message);
     }
+  }
+
+  /** 等待排队中的异步写盘完成（shutdown 用）。 */
+  awaitIdle() {
+    return this._writeChain;
   }
 
   /**
@@ -191,4 +207,5 @@ export class LlmDailyStore {
   }
 }
 
-export const llmDaily = new LlmDailyStore();
+// 单例走异步写盘；测试自行构造时默认仍是同步语义。
+export const llmDaily = new LlmDailyStore(undefined, { writeAsync: atomicWriteAsync });
