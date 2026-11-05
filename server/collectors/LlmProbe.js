@@ -2907,8 +2907,9 @@ export class LlmProbe {
     }
 
     // 首 Token 延迟：直方图 sum/count 的轮询窗口均值；p95 用累计桶估算。
-    const ttftSum = this._getPromMetricMax(txt, "sglang:time_to_first_token_seconds_sum");
-    const ttftCount = this._getPromMetricMax(txt, "sglang:time_to_first_token_seconds_count");
+    // 直方图按 is_streaming 拆成多条序列：求和后再算均值，避免只取到其中一类请求。
+    const ttftSum = this._getPromMetric(txt, "sglang:time_to_first_token_seconds_sum");
+    const ttftCount = this._getPromMetric(txt, "sglang:time_to_first_token_seconds_count");
     if (ttftSum != null && ttftCount != null) {
       if (
         dtSec > 0 &&
